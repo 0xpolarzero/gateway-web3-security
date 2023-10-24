@@ -1,0 +1,3 @@
+[submodule "04-advanced-defi-perpetuals/contracts/lib/forge-std"]
+	path = 04-advanced-defi-perpetuals/contracts/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
