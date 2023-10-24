@@ -1,6 +1,8 @@
 # gateway-web3-security
 
-Personal notes, code &amp; reviews from the Gateway program.
+This repo contains my personal notes, code and reviews from the Gateway program.
+
+While they mostly include insight from [Owen Thurm](https://twitter.com/0xOwenThurm) and the other participants, I also added some of my own knowledge and experience. This is why—although I believe Owen has sufficient expertise and experience to be considered strongly reliable—**some notes might be tainted with my own assumptions, as accurate as I tried to be**.
 
 ## Links
 
