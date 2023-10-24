@@ -1,5 +1,7 @@
 # External calls safety
 
+_These are a mix of principles described by Owen and my own additional observations._
+
 ## Overview
 
 Many issues are related to external calls (one of the most common issues with oracle manipulation); e.g. reentrancy, DoS, return values, gas...
@@ -135,7 +137,3 @@ assembly {
 - [Dave Nicolette, Design By Contract: Part Two, 2018-05-08](https://www.leadingagile.com/2018/05/design-by-contract-part-two/)
 
 - [Wikipedia, Hoare logic](https://en.wikipedia.org/wiki/Hoare_logic)
-
-```
-
-```
