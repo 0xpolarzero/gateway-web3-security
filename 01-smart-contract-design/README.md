@@ -1,4 +1,4 @@
-# Principles of Smart Contract Design
+# Principles of smart contract design
 
 _These are a mix of principles described by Owen and my own additional observations._
 

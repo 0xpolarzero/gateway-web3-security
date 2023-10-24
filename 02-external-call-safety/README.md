@@ -1,4 +1,4 @@
-# External calls safety
+# External call safety
 
 _These are a mix of principles described by Owen and my own additional observations._
 
