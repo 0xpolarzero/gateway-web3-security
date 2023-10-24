@@ -34,7 +34,7 @@ _These are a mix of principles described by Owen and my own additional observati
 
 - Often, they _seem_ necessary when they can actually be replaced for a more efficient and reliable solution.
 
-  - e.g. tracking a "total" value from the start instead of aggregating it from separate values in a loop; or sometimes, it can even just be derived from another value that already exists.
+      - e.g. tracking a "total" value from the start instead of aggregating it from separate values in a loop; or sometimes, it can even just be derived from another value that already exists.
 
 **Strategies**
 
@@ -54,7 +54,8 @@ _These are a mix of principles described by Owen and my own additional observati
 
 - Be explicit about behaviors that might not make sense, yet are still possible. It might make sense to cut off some paths that are not expected, even if they are not necessarily harmful.
 
-  - e.g. if a user can create a position in a DeFi protocol with 0 size and 0 collateral; this doesn't really make sense, yet it might be better to explicitly disallow it;
+      - e.g. if a user can create a position in a DeFi protocol with 0 size and 0 collateral; this doesn't really make sense, yet it might be better to explicitly disallow it;
+
   - generally it's good to think that something unexpected _in_ might produce something unexpected _out_;
   - a zero address check is a good example, but it is really just the tip of the iceberg, as it also concerns protocol-specific checks.
 
@@ -71,8 +72,8 @@ _These are a mix of principles described by Owen and my own additional observati
 
 - It might seem related to **3**, but it's about considering what can't be simply reverted/handled at the input—meaning taking care of _all_ possibilities.
 
-  - e.g. even though you made sure a stablecoin _cannot_ depeg, handle the case where it _does_ depeg.
-  - e.g. a user should _never_ reach a certain collateralization ratio, because they should be liquidated _long_ before; but what if the keepers in charge of doing so actually fail to do so? what if the network gets too congested during rapid price movements? what if then, the calculation cannot be handled correctly anymore (underflow/overflow)?
+      - e.g. even though you made sure a stablecoin _cannot_ depeg, handle the case where it _does_ depeg.
+      - e.g. a user should _never_ reach a certain collateralization ratio, because they should be liquidated _long_ before; but what if the keepers in charge of doing so actually fail to do so? what if the network gets too congested during rapid price movements? what if then, the calculation cannot be handled correctly anymore (underflow/overflow)?
 
 **Strategies**
 
