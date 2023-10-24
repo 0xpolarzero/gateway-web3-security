@@ -45,6 +45,10 @@ Stateful fuzzing requires to define invariants, which will basically either be p
 
   2. How qualitative and exhaustive the invariants you defined are.
 
+## Other methods
+
+There are much more techniques not mentioned here, such as property-based testing, symbolic execution, etc. A great complement to stateful fuzzing is symbolic testing, which will mathematically prove the invariants you defined. For instance, [Halmos](https://github.com/a16z/halmos) that allows to write tests in a way very similar to fuzz tests, except that inputs will be symbolic variables representing all possible values of that type—instead of a random value in this range.
+
 ## Additional resources
 
 - [0xNorman, Differential Fuzzing On Solidity Fixed-Point Libraries, 2023-06-28](https://ventral.digital/posts/2023/6/28/differential-fuzzing-on-solidity-fixed-point-libraries).
