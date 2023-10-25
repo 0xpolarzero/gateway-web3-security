@@ -58,12 +58,9 @@ contract HelperConfig is Script {
             return activeNetworkConfig;
         }
 
-        vm.startBroadcast();
         MockERC20 usdcMock = new MockERC20("USDC", "USDC", 6);
-
         MockV3Aggregator usdcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, USDC_USD_PRICE);
         MockV3Aggregator btcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, BTC_USD_PRICE);
-        vm.stopBroadcast();
 
         return NetworkConfig({
             collateralAsset: Perps.Asset({
