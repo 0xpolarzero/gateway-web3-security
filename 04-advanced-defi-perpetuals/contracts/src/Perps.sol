@@ -34,8 +34,9 @@ pragma solidity 0.8.20;
 
 import {ERC4626} from "solady/tokens/ERC4626.sol";
 
-import {OracleLib} from "./libraries/OracleLib.sol";
 import {Keys} from "./libraries/Keys.sol";
+import {OracleLib} from "./libraries/OracleLib.sol";
+import {Utils} from "./libraries/Utils.sol";
 
 import {IERC20} from "./interfaces/IERC20.sol";
 
@@ -126,7 +127,27 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /* --------------------------- LIQUIDITY PROVIDERS -------------------------- */
 
-    function depositLiquidity() external payable {}
+    /**
+     * @dev Deposit liquidity in the contract
+     * @dev The ERC4626 Vault `deposit` function will basically take care of everything, including:
+     * - Transfering the collateral to the contract
+     *   - The amount needs to be approved beforehand
+     *   - The transaction will revert if the transfer fails, meaning that it won't fail silently
+     * - Minting the corresponding amount of shares to the caller
+     * - Emitting a `Deposit` event, which will include the following:
+     *   - address indexed by,
+     *   - address indexed to,
+     *   - uint256 assets,
+     *   - uint256 shares.
+     * @dev The total liquidity will be updated in the `_afterDeposit` hook
+     * @param amount The amount of collateral (collateralAsset) to deposit
+     */
+    function depositLiquidity(uint256 amount) external {
+        // Check that the amount is not 0 - this will revert if it's the case
+        Utils.assembly_checkValueNotZero(amount);
+        // Call the ERC4626 Vault `deposit` function
+        deposit(amount, msg.sender);
+    }
 
     function withdrawLiquidity(uint256 amount) external {}
 
@@ -247,8 +268,15 @@ contract Perps is ERC4626 {
     /// @dev Hook that is called before any withdrawal or redemption.
     function _beforeWithdraw(uint256 assets, uint256 shares) internal override {}
 
-    /// @dev Hook that is called after any deposit or mint.
-    function _afterDeposit(uint256 assets, uint256 shares) internal override {}
+    /**
+     * @dev Hook that is called after any deposit or mint.
+     * @param assets The amount of collateral deposited
+     */
+
+    function _afterDeposit(uint256 assets, uint256 /* shares */ ) internal override {
+        // Update the total liquidity
+        totalLiquidity = totalLiquidity + assets;
+    }
 
     /* ---------------------------- METADATA (ERC20) ---------------------------- */
 
