@@ -4,9 +4,9 @@
 [submodule "04-advanced-defi-perpetuals/contracts/lib/chainlink-brownie-contracts"]
 	path = 04-advanced-defi-perpetuals/contracts/lib/chainlink-brownie-contracts
 	url = https://github.com/smartcontractkit/chainlink-brownie-contracts
-[submodule "04-advanced-defi-perpetuals/contracts/lib/openzeppelin-contracts"]
-	path = 04-advanced-defi-perpetuals/contracts/lib/openzeppelin-contracts
-	url = https://github.com/openzeppelin/openzeppelin-contracts
 [submodule "04-advanced-defi-perpetuals/contracts/lib/solady"]
 	path = 04-advanced-defi-perpetuals/contracts/lib/solady
 	url = https://github.com/vectorized/solady
+[submodule "04-advanced-defi-perpetuals/contracts/lib/halmos-cheatcodes"]
+	path = 04-advanced-defi-perpetuals/contracts/lib/halmos-cheatcodes
+	url = https://github.com/a16z/halmos-cheatcodes
