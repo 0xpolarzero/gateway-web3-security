@@ -9,8 +9,10 @@ import {HelperConfig} from "./HelperConfig.s.sol";
 contract PerpsDeploy is Script {
     function run() external returns (Perps perps, HelperConfig config) {
         vm.startBroadcast();
-        perps = new Perps();
         config = new HelperConfig();
+
+        (Perps.Asset memory collateralAsset, Perps.Asset memory indexedAsset,) = config.activeNetworkConfig();
+        perps = new Perps(collateralAsset, indexedAsset.priceFeed);
         vm.stopBroadcast();
     }
 }

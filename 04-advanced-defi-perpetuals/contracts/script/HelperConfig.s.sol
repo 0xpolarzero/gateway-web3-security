@@ -13,17 +13,17 @@ import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 contract HelperConfig is Script {
     struct NetworkConfig {
-        address asset;
-        address priceFeed;
-        uint8 decimals;
+        Perps.Asset collateralAsset;
+        Perps.Asset indexedAsset;
         uint256 deployerKey;
     }
 
     NetworkConfig public activeNetworkConfig;
 
     /// @dev Mock constants for price feeds
-    uint8 public constant DECIMALS = 8;
+    uint8 public constant DECIMALS_NON_ETH_PAIR = 8;
     int256 public constant BTC_USD_PRICE = 30_000e8;
+    int256 public constant USDC_USD_PRICE = 1e8;
 
     uint256 public constant ANVIL_DEPLOYER_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
@@ -35,29 +35,47 @@ contract HelperConfig is Script {
         }
     }
 
-    function getSepoliaEthConfig() public view returns (NetworkConfig memory) {
+    function getSepoliaEthConfig() public returns (NetworkConfig memory) {
+        MockERC20 usdcMock = new MockERC20("USDC", "USDC", 6);
+
         return NetworkConfig({
-            asset: 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063, // WBTC
-            priceFeed: 0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43, // BTC/USD price feed
-            decimals: 8,
+            collateralAsset: Perps.Asset({
+                token: address(usdcMock), // USDC (mock)
+                priceFeed: 0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E, // USDC/USD
+                decimals: 6 // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
+            }),
+            indexedAsset: Perps.Asset({
+                token: address(0), // We don't need the actual token (which would be WBTC in any case)
+                priceFeed: 0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43, // BTC/USD
+                decimals: 0 // We don't need this as well
+            }),
             deployerKey: vm.envUint("PRIVATE_KEY")
         });
     }
 
     function getAnvilEthConfig() public returns (NetworkConfig memory) {
-        if (activeNetworkConfig.asset != address(0)) {
+        if (activeNetworkConfig.collateralAsset.token != address(0)) {
             return activeNetworkConfig;
         }
 
         vm.startBroadcast();
-        MockV3Aggregator btcUsdPriceFeed = new MockV3Aggregator(DECIMALS, BTC_USD_PRICE);
-        MockERC20 wbtcMock = new MockERC20("Wrapped Bitcoin", "WBTC", 8);
+        MockERC20 usdcMock = new MockERC20("USDC", "USDC", 6);
+
+        MockV3Aggregator usdcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, USDC_USD_PRICE);
+        MockV3Aggregator btcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, BTC_USD_PRICE);
         vm.stopBroadcast();
 
         return NetworkConfig({
-            asset: address(wbtcMock),
-            priceFeed: address(btcUsdPriceFeed),
-            decimals: DECIMALS,
+            collateralAsset: Perps.Asset({
+                token: address(usdcMock), // USDC (mock)
+                priceFeed: address(usdcUsdPriceFeed), // USDC/USD
+                decimals: 6 // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
+            }),
+            indexedAsset: Perps.Asset({
+                token: address(0), // We don't need the actual token (which would be WBTC in any case)
+                priceFeed: address(btcUsdPriceFeed), // BTC/USD
+                decimals: 0 // We don't need this as well
+            }),
             deployerKey: ANVIL_DEPLOYER_KEY
         });
     }

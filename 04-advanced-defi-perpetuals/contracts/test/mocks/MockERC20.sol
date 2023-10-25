@@ -8,10 +8,10 @@ contract MockERC20 is ERC20 {
     string private _symbol;
     uint8 private _decimals;
 
-    constructor(string memory _name, string memory _symbol, uint8 _decimals) {
-        _name = _name;
-        _symbol = _symbol;
-        _decimals = _decimals;
+    constructor(string memory _tokenNname, string memory _tokenSymbol, uint8 _tokenDecimals) {
+        _name = _tokenNname;
+        _symbol = _tokenSymbol;
+        _decimals = _tokenDecimals;
     }
 
     function mint(address account, uint256 amount) external {
