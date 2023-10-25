@@ -136,7 +136,7 @@ contract Perps is ERC4626 {
      * - Minting the corresponding amount of shares to the caller
      * - Emitting a `Deposit` event, which will include the following:
      *   - address indexed by,
-     *   - address indexed to,
+     *   - address indexed owner,
      *   - uint256 assets,
      *   - uint256 shares.
      * @dev The total liquidity will be updated in the `_afterDeposit` hook
@@ -214,7 +214,9 @@ contract Perps is ERC4626 {
 
     function _calculateTotalPnL() internal view returns (uint256 totalPnL) {}
 
-    function _calculateNetValue() internal view returns (uint256 netValue) {}
+    function _calculateNetValue() internal view returns (uint256 netValue) {
+        return totalLiquidity;
+    }
 
     function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
         // See liquidity reserve restrictions
@@ -240,7 +242,7 @@ contract Perps is ERC4626 {
 
     function totalAssets() public view override returns (uint256) {
         // return _calculateNetValue(); but maybe with additional decimals now?? don't think so
-        return 0;
+        return _calculateNetValue();
     }
 
     /* -------------------------------- CONSTANTS ------------------------------- */
