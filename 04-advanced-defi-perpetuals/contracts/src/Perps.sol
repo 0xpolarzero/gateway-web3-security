@@ -15,7 +15,7 @@ pragma solidity 0.8.20;
 
 // [x] 1. ERC20 interface, the only allowed token to use as collateral
 // [x] 2. Indexed asset, oracle price feed
-// [ ] 3. ERC4626 Vault to account for deposits + add deposit functionnality
+// [x] 3. ERC4626 Vault to account for deposits + add deposit functionnality
 // [ ] 4. Withdraw functionnality BUT WITH TODO to check if allowed to withdraw
 // [ ] 5. Calculation for total open interest + total open interest in tokens
 // [ ] 6. Calculation for LP value
@@ -36,7 +36,6 @@ import {ERC4626} from "solady/tokens/ERC4626.sol";
 
 import {Keys} from "./libraries/Keys.sol";
 import {OracleLib} from "./libraries/OracleLib.sol";
-import {Utils} from "./libraries/Utils.sol";
 
 import {IERC20} from "./interfaces/IERC20.sol";
 
@@ -44,6 +43,12 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /*                                   ERRORS                                   */
     /* -------------------------------------------------------------------------- */
+
+    /// @dev The value cannot be 0
+    error Perps_ZeroValueNotAllowed();
+
+    /// @dev There is not enough liquidity to perform the operation
+    error Perps_NotEnoughLiquidity(uint256 availableLiquidity);
 
     /* -------------------------------------------------------------------------- */
     /*                                   EVENTS                                   */
@@ -61,6 +66,14 @@ contract Perps is ERC4626 {
         address token;
         address priceFeed;
         uint8 decimals;
+    }
+
+    /// @dev A total open interest (either long or short)
+    /// @param usd The total open interest in USD
+    /// @param tokens The total open interest in tokens
+    struct OpenInterest {
+        uint256 usd;
+        uint256 tokens;
     }
 
     // struct Position {}
@@ -94,12 +107,11 @@ contract Perps is ERC4626 {
     /// It just makes it more consistent with the collateral asset
     Asset public indexedToken;
 
-    /// @dev The total open interest in USD (total size of all positions)
-    uint256 public totalOpenInterestUsd;
+    /// @dev The total open interest for shorts (total size of all these positions)
+    OpenInterest public shortOpenInterest;
 
-    /// @dev The total open interest indexed-token wise
-    /// @dev Here in BTC
-    uint256 public totalOpenInterestToken;
+    /// @dev The total open interest for longs (total size of all these positions)
+    OpenInterest public longOpenInterest;
 
     /// @dev The total liquidity deposited in USD
     uint256 public totalLiquidity;
@@ -143,13 +155,39 @@ contract Perps is ERC4626 {
      * @param amount The amount of collateral (collateralAsset) to deposit
      */
     function depositLiquidity(uint256 amount) external {
-        // Check that the amount is not 0 - this will revert if it's the case
-        Utils.assembly_checkValueNotZero(amount);
+        if (amount == 0) revert Perps_ZeroValueNotAllowed();
         // Call the ERC4626 Vault `deposit` function
         deposit(amount, msg.sender);
     }
 
-    function withdrawLiquidity(uint256 amount) external {}
+    /**
+     * @dev Withdraw liquidity from the contract
+     * @dev The ERC4626 Vault `withdraw` function will basically take care of everything, including:
+     * - Burning the corresponding amount of shares from the caller
+     * - Transfering back the collateral to the provider
+     *   - The transaction will revert if the transfer fails, meaning that it won't fail silently
+     * - Emitting a `Withdraw` event, which will include the following:
+     *   - address indexed by,
+     *   - address indexed to,
+     *   - address indexed owner,
+     *   - uint256 assets,
+     *   - uint256 shares.
+     * @dev The total liquidity will be updated in the `_beforeWithdraw` hook
+     * @param amount The amount of collateral (collateralAsset) to withdraw
+     */
+    function withdrawLiquidity(uint256 amount) external {
+        if (amount == 0) revert Perps_ZeroValueNotAllowed();
+        // Check that the amount is not greater than the available liquidity
+        uint256 availableLiquidity = _calculateAvailableLiquidity();
+        if (amount > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
+        // Call the ERC4626 Vault `withdraw` function
+        // amount, recipient, owner
+        withdraw(amount, msg.sender, msg.sender);
+
+        // Verify that the invariants are not broken
+        // @audit-info Is this too redundant?
+        _validateLiquidityRestrictions();
+    }
 
     /* --------------------------------- TRADERS -------------------------------- */
 
@@ -163,12 +201,20 @@ contract Perps is ERC4626 {
 
     /* --------------------------------- GETTERS -------------------------------- */
 
-    function getCollateralPrice() external view returns (int256) {
+    function getCollateralPrice() public view returns (int256) {
         return _assetPrice(collateralAsset.priceFeed);
     }
 
-    function getIndexedPrice() external view returns (int256) {
+    function getIndexedPrice() public view returns (int256) {
         return _assetPrice(indexedToken.priceFeed);
+    }
+
+    function getAvailableLiquidity() public view returns (uint256) {
+        return _calculateAvailableLiquidity();
+    }
+
+    function getNetValue() public view returns (uint256) {
+        return _calculateNetValue();
     }
 
     /* -------------------------------------------------------------------------- */
@@ -191,35 +237,56 @@ contract Perps is ERC4626 {
         // Set the new open interest in tokens
     }
 
-    /* --------------------------- LIQUIDITY PROVIDERS -------------------------- */
-
-    function _depositLiquidity(uint256 amount) internal {}
-
-    function _withdrawLiquidity(uint256 amount) internal {
-        // cannot witdraw liquidity that is reserved for positions
-        // -> basically check that the invariants are not broken
-        // --> might as well check it before with simple revert but also enfore at after??
-        // Also check the liquidity reserve restrictions (see calculation)
-        // Probably calculated the net value so might as well emit it
-    }
-
     /* -------------------------------- PROTOCOL -------------------------------- */
 
-    function _validateLiquidityRestrictions() internal {
-        // Invariants
-        // Basically check again that the new position/liquidity withdrawal does not break the invariants
-        // Even thought it's a bit redundant since it's been checked before, it's the
-        // most important part of the contract so better safe than sorry
-    }
+    /// @dev Returns the total PnL of the protocol collateral-wise
+    function _calculateTotalPnL() internal view returns (int256 totalPnL) {}
 
-    function _calculateTotalPnL() internal view returns (uint256 totalPnL) {}
-
+    /// @dev Returns the net value collateral-wise
     function _calculateNetValue() internal view returns (uint256 netValue) {
-        return totalLiquidity;
+        // If the total PnL were to be higher than the total liquidity, this would revert
+        // Hopefully it should never happen as it would mean that the protocol is rekt
+
+        int256 totalPnL = _calculateTotalPnL();
+        // If the PnL is negative, ignore it
+        // It does not perfectly reflect the net value but it is what we want here
+        // @audit-info Still check if it's accurate and not an issue
+        return totalLiquidity - (totalPnL < 0 ? 0 : uint256(_calculateTotalPnL()));
     }
 
+    /// @dev Returns the available liquidity USD-wise
+    /// @dev We need to do that because the long+short open interests are compared in a similar unit
+    /// which is USD
+    /// @dev This provokes a lot of oracle requests, but it's the price to pay for more accurate calculations
     function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
-        // See liquidity reserve restrictions
+        // @audit-info Is it overkill to use the net value here instead of deposited liquidity?
+        // (meaning we susbstract the PnL as well)...
+        // ... since there is already the exposure ratio applied
+        // (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (netValue * maxUtilizationPercentage)
+        int256 collateralPrice = getCollateralPrice();
+        int256 indexTokenPrice = getIndexedPrice();
+
+        uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
+        uint256 currentlyUsed =
+            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice));
+
+        if (maxAvailable > currentlyUsed) {
+            availableLiquidity = maxAvailable - currentlyUsed;
+            // Here as well, this should not happen, since it would mean that the protocol is insolvent
+        } else {
+            availableLiquidity = 0;
+        }
+    }
+
+    /**
+     * @dev Enforce the liquidity reserve restrictions
+     * @dev Basically check that the new position/liquidity withdrawal does not break the invariants
+     * which are calculated in `_calculateAvailableLiquidity`
+     * Note: It might be a bit redundant to check it here as well since it's been checked before
+     * performing the operations, but it's the most important part of the contract so better safe than sorry
+     */
+    function _validateLiquidityRestrictions() internal view {
+        if (_calculateAvailableLiquidity() == 0) revert Perps_NotEnoughLiquidity(0);
     }
 
     /* ---------------------------------- ASSET --------------------------------- */
