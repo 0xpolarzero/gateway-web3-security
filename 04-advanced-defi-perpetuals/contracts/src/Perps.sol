@@ -172,20 +172,19 @@ contract Perps is ERC4626 {
      *   - address indexed owner,
      *   - uint256 assets,
      *   - uint256 shares.
+     * @dev The available liquidity will be checked in the `_beforeWithdraw` hook
      * @dev The total liquidity will be updated in the `_beforeWithdraw` hook
      * @param amount The amount of collateral (collateralAsset) to withdraw
      */
     function withdrawLiquidity(uint256 amount) external {
         if (amount == 0) revert Perps_ZeroValueNotAllowed();
-        // Check that the amount is not greater than the available liquidity
-        uint256 availableLiquidity = _calculateAvailableLiquidity();
-        if (amount > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
         // Call the ERC4626 Vault `withdraw` function
         // amount, recipient, owner
         withdraw(amount, msg.sender, msg.sender);
 
         // Verify that the invariants are not broken
         // @audit-info Is this too redundant?
+        // Or maybe we can remove the check in the `_beforeWithdraw` hook?
         _validateLiquidityRestrictions();
     }
 
@@ -266,7 +265,12 @@ contract Perps is ERC4626 {
         int256 collateralPrice = getCollateralPrice();
         int256 indexTokenPrice = getIndexedPrice();
 
-        uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
+        /// @audit-info This would apply the exposure ratio to the net value
+        // uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
+        /// Maybe it's better to apply it to the total liquidity and THEN substract the total PnL
+        int256 totalPnL = _calculateTotalPnL();
+        uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
+        uint256 maxAvailable = ((totalLiquidity * MAX_EXPOSURE) / 100) - totalPnLNormalized;
         uint256 currentlyUsed =
             (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice));
 
@@ -307,8 +311,9 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /* ------------------------------- ACCOUNTING ------------------------------- */
 
+    /// @dev Return the total assets of the vault (here the net value)
+    /// Meaning that we substract the total PnL from the total liquidity
     function totalAssets() public view override returns (uint256) {
-        // return _calculateNetValue(); but maybe with additional decimals now?? don't think so
         return _calculateNetValue();
     }
 
@@ -329,16 +334,29 @@ contract Perps is ERC4626 {
     /// @dev Here we have 12 decimals added to the original 6 decimals of USDC
     /// which makes it being handled as a 18 decimals token in the vault
     function _decimalsOffset() internal pure override returns (uint8) {
-        return 12;
+        return Keys.DECIMALS_OFFSET;
     }
 
     /* ---------------------------------- HOOKS --------------------------------- */
 
-    /// @dev Hook that is called before any withdrawal or redemption.
-    function _beforeWithdraw(uint256 assets, uint256 shares) internal override {}
+    /**
+     * @dev Hook that is called before any withdrawal.
+     * @param assets The amount of collateral to withdraw
+     */
+
+    function _beforeWithdraw(uint256 assets, uint256 /* shares */ ) internal override {
+        // Check that the amount is not greater than the available liquidity
+        uint256 availableLiquidity = _calculateAvailableLiquidity();
+        if (assets > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
+
+        // Update the total liquidity
+        unchecked {
+            totalLiquidity = totalLiquidity - assets;
+        }
+    }
 
     /**
-     * @dev Hook that is called after any deposit or mint.
+     * @dev Hook that is called after any deposit.
      * @param assets The amount of collateral deposited
      */
 
