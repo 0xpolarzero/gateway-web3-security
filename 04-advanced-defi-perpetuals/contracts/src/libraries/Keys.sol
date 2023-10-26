@@ -18,4 +18,11 @@ library Keys {
 
     /// @dev The maximum time allowed for a price update
     uint256 internal constant MAX_ORACLE_RESPONSE_TIMEOUT = 3 hours;
+
+    /* -------------------------------------------------------------------------- */
+    /*                                ERC4626 VAULT                               */
+    /* -------------------------------------------------------------------------- */
+
+    /// @dev The decimals offset to mitigate floating point precision errors
+    uint8 internal constant DECIMALS_OFFSET = 12;
 }
