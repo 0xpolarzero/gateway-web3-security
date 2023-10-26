@@ -16,23 +16,34 @@ pragma solidity 0.8.20;
 // [x] 1. ERC20 interface, the only allowed token to use as collateral
 // [x] 2. Indexed asset, oracle price feed
 // [x] 3. ERC4626 Vault to account for deposits + add deposit functionnality
-// [ ] 4. Withdraw functionnality BUT WITH TODO to check if allowed to withdraw
-// [ ] 5. Calculation for total open interest + total open interest in tokens
-// [ ] 6. Calculation for LP value
-// [ ] 7. Calculation for available liquidity to withdraw (see liquidity reserve restrictions)
+// [x] 4. Withdraw functionnality BUT WITH TODO to check if allowed to withdraw
+// [x] 5. Calculation for total open interest + total open interest in tokens
+// [x] 6. Calculation for LP value
+// [x] 7. Calculation for available liquidity to withdraw (see liquidity reserve restrictions)
 // -> (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (depositedLiquidity * maxUtilizationPercentage)
 // [ ] 8. Calculation for PnL (for both long and short)
-// [ ] 9. Right now no need to close positions but what happens then? Delete it? Set it to open = false?
-// [ ] 10. Open long/short position
-// [ ] 11. Increase size
-// [ ] 12. Increase collateral
+// -> WE MIGHT BE ABLE TO FIND IT EASILY:
+// -> We have total size in tokens (=open interest) for each type, we just need to compare it to current index price
+// -> then combine both and get a PnL
+// [x] 9. Open long/short position
+// [ ] 10. Increase size
+// [ ] 11. Increase collateral
 // Stop it here for this mission
+// Later to close position, 2 choices
+// 1. When opening position, add index of the position in the array
+// -> when closing, delete it from the array (replace with last, delete last, update index)
+// -> in this case, we can remove OPEN/CLOSED status
+// 2. Keep the array as is, but add a status (open/closed)
+// -> when closing, set status to closed
+// -> but then at some point we might have a lot of closed positions in the array
 
 /* -------------------------------------------------------------------------- */
 /*                                  CONTRACT                                  */
 /* -------------------------------------------------------------------------- */
 
 import {ERC4626} from "solady/tokens/ERC4626.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 import {Keys} from "./libraries/Keys.sol";
 import {OracleLib} from "./libraries/OracleLib.sol";
@@ -50,15 +61,41 @@ contract Perps is ERC4626 {
     /// @dev There is not enough liquidity to perform the operation
     error Perps_NotEnoughLiquidity(uint256 availableLiquidity);
 
+    /// @dev The position size is too small
+    error Perps_SizeTooSmall(uint256 size, uint256 minSize);
+
+    /// @dev The position does not have enough collateral
+    error Perps_NotEnoughCollateral(uint256 collateral, uint256 minCollateral);
+
+    /// @dev The leverage is too high
+    error Perps_LeverageTooHigh(uint256 leverage, uint256 maxLeverage);
+
     /* -------------------------------------------------------------------------- */
     /*                                   EVENTS                                   */
     /* -------------------------------------------------------------------------- */
+
+    /// @dev Emitted when the open interest is updated
+    /// @param longUsd The total open interest for longs in USD (6 decimals)
+    /// @param longTokens The total open interest for longs in tokens (8 decimals)
+    /// @param shortUsd The total open interest for shorts in USD (6 decimals)
+    /// @param shortTokens The total open interest for shorts in tokens (8 decimals)
+    event Perps_OpenInterestUpdated(uint128 longUsd, uint128 longTokens, uint128 shortUsd, uint128 shortTokens);
+
+    /// @dev Emitted when a position is opened
+    /// @param trader The address of the trader
+    /// @param size The size of the position in USD (6 decimals)
+    /// @param collateral The amount of collateral deposited to back this position (6 decimals)
+    /// @param direction The direction of the position (long or short)
+    /// @param leverage The initial of the position
+    event Perps_PositionOpened(
+        address indexed trader, uint256 size, uint256 collateral, uint256 direction, uint256 leverage
+    );
 
     /* -------------------------------------------------------------------------- */
     /*                                   STRUCT                                   */
     /* -------------------------------------------------------------------------- */
 
-    /// @dev An asset (token) used as collateral
+    /// @dev An asset (token) used as collateral or index
     /// @param token The address of the asset
     /// @param priceFeed The address of the Chainlink price feed (token/USD)
     /// @param decimals The number of decimals of the asset
@@ -69,28 +106,46 @@ contract Perps is ERC4626 {
     }
 
     /// @dev A total open interest (either long or short)
-    /// @param usd The total open interest in USD
-    /// @param tokens The total open interest in tokens
+    /// @param usd The total open interest in USD (6 decimals)
+    /// @param tokens The total open interest in tokens (8 decimals)
     struct OpenInterest {
-        uint256 usd;
-        uint256 tokens;
+        uint128 usd; // this can go as high as 340 trillion trillion trillion USD
+        uint128 tokens; // this can go as high as 3.4 trillion trillion trillion tokens
     }
 
-    // struct Position {}
-    // size, sizeInToken, collateral, direction, open?, timestamp?, address?
+    /// @dev A position
+    /// @param size The size of the position in USD
+    /// @param collateral The collateral deposited to back the position in collateral tokens
+    /// @param owner The address of the trader
+    /// @param direction The direction of the position (long or short)
+    /// @param status The status of the position (open or closed)
+    /// @param timestamp The timestamp of the position creation
+    struct Position {
+        uint128 size;
+        uint128 collateral;
+        address trader;
+        uint8 direction;
+        uint8 status;
+        uint80 timestamp; // might as well finish up the second slot
+    }
 
     /* -------------------------------------------------------------------------- */
     /*                                  CONSTANTS                                 */
     /* -------------------------------------------------------------------------- */
 
-    /// @dev The type of the position; either LONG (1) or SHORT (2)
-    uint256 constant LONG = 1;
-    uint256 constant SHORT = 2;
+    /// @dev The direction of the position; either long (1) or short (2)
+    uint256 private constant POSITION_LONG = 1;
+    uint256 private constant POSITION_SHORT = 2;
+
+    /// @dev The status of the position; either open (1) or closed (2)
+    // @audit-info Should we rather use 0 for open, since it's how it will be initialized?
+    uint256 private constant POSITION_OPEN = 1;
+    uint256 private constant POSITION_CLOSED = 2;
 
     /// @dev The maximum percentage of total liquidity that can be actively used
     /// @dev Meaning that a withdrawal or a new position cannot be opened if it would
     /// make the total open interest exceed this percentage
-    uint256 constant MAX_EXPOSURE = Keys.MAX_EXPOSURE;
+    uint256 public constant MAX_EXPOSURE = Keys.MAX_EXPOSURE;
 
     /* -------------------------------------------------------------------------- */
     /*                                   STORAGE                                  */
@@ -101,11 +156,11 @@ contract Perps is ERC4626 {
     /// @dev Here USDC
     Asset public collateralAsset;
 
-    /// @dev The ERC20 token used as the indexed asset
+    /// @dev The ERC20 token used as the index asset
     /// @dev Here BTC
     /// Note: We actually just need the price feed, so the address & decimals will be left empty
     /// It just makes it more consistent with the collateral asset
-    Asset public indexedToken;
+    Asset public indexToken;
 
     /// @dev The total open interest for shorts (total size of all these positions)
     OpenInterest public shortOpenInterest;
@@ -116,22 +171,22 @@ contract Perps is ERC4626 {
     /// @dev The total liquidity deposited in USD
     uint256 public totalLiquidity;
 
-    // Total PnL -> NO; this is calculated at "runtime" when closing a position BUT also depositing/withdrawing liquidity
-    // Override totalAssets from ERC4626 to actually use LP Value (total deposited - PnL)
+    /// @dev The positions associated to each trader
+    mapping(address trader => Position[] positions) public positions;
 
     /* -------------------------------------------------------------------------- */
     /*                                  CONSTRUCTOR                               */
     /* -------------------------------------------------------------------------- */
 
     /**
-     * @dev Initialize the contract with the collateral asset and the indexed asset
+     * @dev Initialize the contract with the collateral asset and the index asset
      * @param collateral The token used as collateral (address, price feed & decimals)
-     * @param indexedPriceFeed The price feed of the indexed asset (token/USD)
+     * @param indexPriceFeed The price feed of the index asset (token/USD)
      */
 
-    constructor(Asset memory collateral, address indexedPriceFeed) {
+    constructor(Asset memory collateral, address indexPriceFeed) {
         collateralAsset = collateral;
-        indexedToken.priceFeed = indexedPriceFeed; // The token & decimals can stay empty
+        indexToken.priceFeed = indexPriceFeed; // The token & decimals can stay empty
     }
 
     /* -------------------------------------------------------------------------- */
@@ -190,9 +245,27 @@ contract Perps is ERC4626 {
 
     /* --------------------------------- TRADERS -------------------------------- */
 
-    function openLong(uint256 size, uint256 collateral) external {}
+    /**
+     * @dev Create a long position
+     * @dev The conditions/overall process are described in the `_openPosition` function
+     * @param size The size of the position in USD (6 decimals)
+     * @param collateral The amount of collateral deposited to back this position (6 decimals)
+     */
 
-    function openShort(uint256 size, uint256 collateral) external {}
+    function openLong(uint256 size, uint256 collateral) external {
+        _openPosition(size, collateral, POSITION_LONG);
+    }
+
+    /**
+     * @dev Create a short position
+     * @dev The conditions/overall process are described in the `_openPosition` function
+     * @param size The size of the position in USD (6 decimals)
+     * @param collateral The amount of collateral deposited to back this position (6 decimals)
+     */
+
+    function openShort(uint256 size, uint256 collateral) external {
+        _openPosition(size, collateral, POSITION_SHORT);
+    }
 
     function increaseSize(uint256 positionId, uint256 size) external {}
 
@@ -205,7 +278,7 @@ contract Perps is ERC4626 {
     }
 
     function getIndexedPrice() public view returns (int256) {
-        return _assetPrice(indexedToken.priceFeed);
+        return _assetPrice(indexToken.priceFeed);
     }
 
     function getAvailableLiquidity() public view returns (uint256) {
@@ -221,27 +294,120 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /* --------------------------------- TRADERS -------------------------------- */
 
-    function _setPosition(uint256 size, uint256 collateral, uint256 direction) internal {
-        // size or collateral 0 (idk) -> close position
-        // Limit the position to the configured percentage of the deposited liquidity
+    /**
+     * @dev Create a position (long or short)
+     * @dev Requirements:
+     * - The contract has been approved to transfer the collateral from the trader
+     * - The size is higher than the minimum allowed (MIN_POSITION_SIZE)
+     * - The collateral is higher than the minimum allowed (MIN_POSITION_COLLATERAL)
+     * - The collateral is lower than the size
+     * - There is enough liquidity to handle the size (see `_calculateAvailableLiquidity`)
+     * - The leverage is lower than the maximum allowed (MAX_LEVERAGE)
+     * @dev Effects:
+     * - Transfer the collateral to the contract
+     * - Update the open interest
+     * - Create the position
+     * @dev Emits a `Perps_PositionOpened` event
+     * @param size The size of the position in USD (6 decimals)
+     * @param collateral The amount of collateral deposited to back this position (6 decimals)
+     * @param direction The direction of the position (long or short)
+     */
+
+    function _openPosition(uint256 size, uint256 collateral, uint256 direction) internal {
+        // Revert if the size is too small (less than the minimum allowed)
+        if (size < Keys.MIN_POSITION_SIZE) revert Perps_SizeTooSmall(size, Keys.MIN_POSITION_SIZE);
+        // Same for the collateral
+        if (collateral < Keys.MIN_POSITION_COLLATERAL) {
+            revert Perps_NotEnoughCollateral(collateral, Keys.MIN_POSITION_COLLATERAL);
+        }
+
+        // @audit-info Is this necessary? Should we allow it somehow?
+        // Revert if the collateral is higher than the size
+        if (collateral > size) revert Perps_SizeTooSmall(size, collateral);
+
+        // Compare the size to the available liquidity
+        uint256 availableLiquidity = _calculateAvailableLiquidity();
+        if (size > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
+
+        // Convert the collateral to USD to calculate the leverage with similar units
+        // (precision: 1e6 * 1e8 = 14 decimals)
+        uint256 collateralInUSD = FixedPointMathLib.fullMulDiv(collateral, uint256(getCollateralPrice()), 1);
+        // Compare the leverage to the max leverage
+        // (precision: (1e6 * 1e14) / (1e14) = 6 decimals)
+        uint256 leverage = FixedPointMathLib.fullMulDivUp(size, 1e14, collateralInUSD);
+        // both are 6 decimals
+        if (leverage > Keys.MAX_LEVERAGE) revert Perps_LeverageTooHigh(leverage, Keys.MAX_LEVERAGE);
+
+        // Transfer the collateral to the contract
+        SafeTransferLib.safeTransferFrom(collateralAsset.token, msg.sender, address(this), collateral);
+
+        // Update the open interest
+        _updateOpenInterest(size, direction);
+
+        // Create the position
+        positions[msg.sender].push(
+            Position({
+                size: uint128(size),
+                collateral: uint128(collateral),
+                trader: msg.sender,
+                direction: uint8(direction),
+                status: uint8(POSITION_OPEN),
+                timestamp: uint80(block.timestamp)
+            })
+        );
+
+        emit Perps_PositionOpened(msg.sender, size, collateral, direction, leverage);
     }
 
-    function _setOpenInterest() internal view /* Position memory position */ returns (uint256) {
+    function _updatePosition() internal {}
+
+    /**
+     * @dev Update the open interest (long or short)
+     * @dev This is called each time a position is opened/closed or updated
+     * @dev The open interest is calculated in USD and in tokens
+     * @dev If a position is being updated, the size will be the additional/substracted amount
+     * TODO SEE IF IT IS NOT INCONSISTENT AS IT WILL CALCULATE A DIFFERENT PRICE FOR THE INDEX TOKEN
+     * @dev Emits a `Perps_OpenInterestUpdated` event
+     * @param size The size of the position in USD (6 decimals)
+     * @param direction The direction of the position (long or short)
+     */
+
+    function _updateOpenInterest(uint256 size, uint256 direction) internal {
         // Called each time a position is opened/increased (and later decreased/closed to decrease the open interest)
-        // Update the open interest with the last position
-        // Would be nice to use a int256 in the position so we can do it regardless of long/short??
-        // Maybe use a different function to actually calculate it, return it and just update it here
-        // Maybe also use another function to convert it to tokens??
-        // Set the new open interest in USD
-        // Set the new open interest in tokens
+        // (precision: 1e6 * 1e8 / 1e6 = 8 decimals)
+        uint256 sizeInTokens = FixedPointMathLib.fullMulDiv(size, uint256(getIndexedPrice()), 1e6); // but needs *1e2 -> and ADD PRECISION
+
+        // Update the open interest
+        // @audit-info Here casting uint256 to uint128 might seem dangerous, but there is no way anyone could
+        // open a position with a size that would make it overflow
+        if (direction == POSITION_LONG) {
+            longOpenInterest.usd = longOpenInterest.usd + uint128(size);
+            longOpenInterest.tokens = longOpenInterest.tokens + uint128(sizeInTokens);
+        } else {
+            shortOpenInterest.usd = shortOpenInterest.usd + uint128(size);
+            shortOpenInterest.tokens = shortOpenInterest.tokens + uint128(sizeInTokens);
+        }
+
+        emit Perps_OpenInterestUpdated(
+            longOpenInterest.usd, longOpenInterest.tokens, shortOpenInterest.usd, shortOpenInterest.tokens
+        );
     }
 
     /* -------------------------------- PROTOCOL -------------------------------- */
 
-    /// @dev Returns the total PnL of the protocol collateral-wise
+    /**
+     * @dev Return the total PnL of the protocol in collateral tokens
+     * @return totalPnL The accumulated PnL of all positions (6 decimals)
+     */
+
     function _calculateTotalPnL() internal view returns (int256 totalPnL) {}
 
-    /// @dev Returns the net value collateral-wise
+    /**
+     * @dev Return the net value of the protocol in collateral tokens
+     * @return netValue The net value of the protocol (6 decimals)
+     * Note: Basically, it is the total liquidity minus the total PnL
+     */
+
     function _calculateNetValue() internal view returns (uint256 netValue) {
         // If the total PnL were to be higher than the total liquidity, this would revert
         // Hopefully it should never happen as it would mean that the protocol is rekt
@@ -253,10 +419,13 @@ contract Perps is ERC4626 {
         return totalLiquidity - (totalPnL < 0 ? 0 : uint256(_calculateTotalPnL()));
     }
 
-    /// @dev Returns the available liquidity USD-wise
-    /// @dev We need to do that because the long+short open interests are compared in a similar unit
-    /// which is USD
-    /// @dev This provokes a lot of oracle requests, but it's the price to pay for more accurate calculations
+    /**
+     * @dev Return the available liquidity in USD
+     * Note: We need to do it USD-wise to be able to compare it to the open interest (which is in USD)
+     * This results in a lot of oracle requests, but it's the price to pay for more accurate calculations
+     * @return availableLiquidity The available liquidity in USD (6 decimals)
+     */
+
     function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
         // @audit-info Is it overkill to use the net value here instead of deposited liquidity?
         // (meaning we susbstract the PnL as well)...
@@ -270,9 +439,13 @@ contract Perps is ERC4626 {
         /// Maybe it's better to apply it to the total liquidity and THEN substract the total PnL
         int256 totalPnL = _calculateTotalPnL();
         uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
-        uint256 maxAvailable = ((totalLiquidity * MAX_EXPOSURE) / 100) - totalPnLNormalized;
-        uint256 currentlyUsed =
-            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice));
+        // (precision: (1e6 * 1e2) / 1e2) - 1e6 = 1e6
+        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, MAX_EXPOSURE, 100) - totalPnLNormalized;
+        // (precision: ((1e8 * 1e8) + (1e8 * 1e8)) / 1e10) = 1e6
+        uint256 currentlyUsed = FixedPointMathLib.divUp(
+            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice)),
+            1e10
+        );
 
         if (maxAvailable > currentlyUsed) {
             availableLiquidity = maxAvailable - currentlyUsed;
@@ -289,6 +462,7 @@ contract Perps is ERC4626 {
      * Note: It might be a bit redundant to check it here as well since it's been checked before
      * performing the operations, but it's the most important part of the contract so better safe than sorry
      */
+
     function _validateLiquidityRestrictions() internal view {
         if (_calculateAvailableLiquidity() == 0) revert Perps_NotEnoughLiquidity(0);
     }
