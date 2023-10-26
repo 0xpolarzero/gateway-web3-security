@@ -26,9 +26,6 @@ contract PerpsTest is Test {
 
     // OracleLib
     error OracleLib__StalePrice();
-    // Utils
-    error ZeroAddressNotAllowed();
-    error ZeroValueNotAllowed();
     // SafeTransferLib
     error TransferFromFailed();
 
@@ -97,7 +94,7 @@ contract PerpsTest is Test {
 
     /// @dev Revert if the amount is zero
     function test_depositLiquidity_revertsIfAmountZero() external {
-        vm.expectRevert(ZeroValueNotAllowed.selector);
+        vm.expectRevert(Perps.Perps_ZeroValueNotAllowed.selector);
         perps.depositLiquidity(0);
     }
 
