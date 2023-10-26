@@ -11,8 +11,8 @@ contract PerpsDeploy is Script {
         vm.startBroadcast();
         config = new HelperConfig();
 
-        (Perps.Asset memory collateralAsset, Perps.Asset memory indexedAsset,) = config.activeNetworkConfig();
-        perps = new Perps(collateralAsset, indexedAsset.priceFeed);
+        (Perps.Asset memory collateralAsset, Perps.Asset memory indexAsset,) = config.activeNetworkConfig();
+        perps = new Perps(collateralAsset, indexAsset.priceFeed);
         vm.stopBroadcast();
     }
 }

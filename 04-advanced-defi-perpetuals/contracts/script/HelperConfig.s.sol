@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import {Script} from "forge-std/Script.sol";
 
 import {Perps} from "../src/Perps.sol";
+import {Keys} from "../src/libraries/Keys.sol";
 
 import {MockV3Aggregator} from "../test/mocks/MockV3Aggregator.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
@@ -14,7 +15,7 @@ import {MockERC20} from "../test/mocks/MockERC20.sol";
 contract HelperConfig is Script {
     struct NetworkConfig {
         Perps.Asset collateralAsset;
-        Perps.Asset indexedAsset;
+        Perps.Asset indexAsset;
         uint256 deployerKey;
     }
 
@@ -36,15 +37,15 @@ contract HelperConfig is Script {
     }
 
     function getSepoliaEthConfig() public returns (NetworkConfig memory) {
-        MockERC20 usdcMock = new MockERC20("USDC", "USDC", 6);
+        MockERC20 usdcMock = new MockERC20("USDC", "USDC", Keys.COLLATERAL_TOKEN_DECIMALS);
 
         return NetworkConfig({
             collateralAsset: Perps.Asset({
                 token: address(usdcMock), // USDC (mock)
                 priceFeed: 0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E, // USDC/USD
-                decimals: 6 // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
+                decimals: Keys.COLLATERAL_TOKEN_DECIMALS // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
             }),
-            indexedAsset: Perps.Asset({
+            indexAsset: Perps.Asset({
                 token: address(0), // We don't need the actual token (which would be WBTC in any case)
                 priceFeed: 0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43, // BTC/USD
                 decimals: 0 // We don't need this as well
@@ -58,7 +59,7 @@ contract HelperConfig is Script {
             return activeNetworkConfig;
         }
 
-        MockERC20 usdcMock = new MockERC20("USDC", "USDC", 6);
+        MockERC20 usdcMock = new MockERC20("USDC", "USDC", Keys.COLLATERAL_TOKEN_DECIMALS);
         MockV3Aggregator usdcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, USDC_USD_PRICE);
         MockV3Aggregator btcUsdPriceFeed = new MockV3Aggregator(DECIMALS_NON_ETH_PAIR, BTC_USD_PRICE);
 
@@ -66,9 +67,9 @@ contract HelperConfig is Script {
             collateralAsset: Perps.Asset({
                 token: address(usdcMock), // USDC (mock)
                 priceFeed: address(usdcUsdPriceFeed), // USDC/USD
-                decimals: 6 // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
+                decimals: Keys.COLLATERAL_TOKEN_DECIMALS // USDC has 6 decimals, we don't mean the decimals of the value returned by the price feed
             }),
-            indexedAsset: Perps.Asset({
+            indexAsset: Perps.Asset({
                 token: address(0), // We don't need the actual token (which would be WBTC in any case)
                 priceFeed: address(btcUsdPriceFeed), // BTC/USD
                 decimals: 0 // We don't need this as well
