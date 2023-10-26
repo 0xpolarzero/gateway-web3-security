@@ -18,7 +18,7 @@ contract PerpsTest is Test {
     Perps private perps;
     HelperConfig private config;
     Perps.Asset private collateralAsset;
-    Perps.Asset private indexedAsset;
+    Perps.Asset private indexAsset;
 
     /* -------------------------------------------------------------------------- */
     /*                                   ERRORS                                   */
@@ -59,7 +59,7 @@ contract PerpsTest is Test {
 
     function setUp() external {
         (perps, config) = new PerpsDeploy().run();
-        (collateralAsset, indexedAsset,) = config.activeNetworkConfig();
+        (collateralAsset, indexAsset,) = config.activeNetworkConfig();
     }
 
     /* -------------------------------------------------------------------------- */
