@@ -22,7 +22,7 @@ pragma solidity 0.8.20;
 // [x] 6. Calculation for LP value
 // [x] 7. Calculation for available liquidity to withdraw (see liquidity reserve restrictions)
 // -> (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (depositedLiquidity * maxUtilizationPercentage)
-// [ ] 8. Calculation for PnL (for both long and short)
+// [x] 8. Calculation for PnL (for both long and short)
 // -> WE MIGHT BE ABLE TO FIND IT EASILY:
 // -> We have total size in tokens (=open interest) for each type, we just need to compare it to current index price
 // -> then combine both and get a PnL
@@ -159,6 +159,12 @@ contract Perps is ERC4626 {
     /// @dev The positions associated to each trader
     mapping(address trader => Position[] positions) public positions;
 
+    /// @dev The open interest for each trader for longs
+    // mapping(address trader => OpenInterest) public longOpenInterestForTrader;
+
+    /// @dev The open interest for each trader for shorts
+    // mapping(address trader => OpenInterest) public shortOpenInterestForTrader;
+
     /* -------------------------------------------------------------------------- */
     /*                                  CONSTRUCTOR                               */
     /* -------------------------------------------------------------------------- */
@@ -177,7 +183,7 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /*                             EXTERNAL FUNCTIONS                             */
     /* -------------------------------------------------------------------------- */
-    /* --------------------------- LIQUIDITY PROVIDERS -------------------------- */
+    /* -------------------------------- PROTOCOL -------------------------------- */
 
     /**
      * @dev Deposit liquidity in the contract
@@ -256,7 +262,10 @@ contract Perps is ERC4626 {
 
     function increaseCollateral(uint256 positionId, uint256 collateral) external {}
 
-    /* --------------------------------- GETTERS -------------------------------- */
+    /* -------------------------------------------------------------------------- */
+    /*                                   GETTERS                                  */
+    /* -------------------------------------------------------------------------- */
+    /* -------------------------------- PROTOCOL -------------------------------- */
 
     function getAvailableLiquidity() external view returns (uint256) {
         return _calculateAvailableLiquidity();
@@ -269,10 +278,35 @@ contract Perps is ERC4626 {
     function getTotalPnL() external view returns (int256) {
         return _calculateTotalPnL();
     }
+    /* --------------------------------- TRADERS -------------------------------- */
 
     function getPosition(address trader, uint256 index) external view returns (Position memory) {
         return positions[trader][index];
     }
+
+    function getPositionPnL(address trader, uint256 index) external view returns (int256 pnL) {
+        Position memory position = positions[trader][index];
+        int256 tokenPrice = getIndexedPrice();
+        pnL = _calculatePnL(position.size, uint128(position.sizeInTokens), tokenPrice, position.direction);
+    }
+
+    // function getPnLForTrader(address trader) external view returns (int256 pnLForTrader) {
+    //     int256 indexTokenPrice = getIndexedPrice();
+    //     OpenInterest memory _longOpenInterestForTrader = longOpenInterestForTrader[trader];
+    //     OpenInterest memory _shortOpenInterestForTrader = shortOpenInterestForTrader[trader];
+
+    //     // PnL for long can be interpreted as: (openInterestInTokens * indexTokenPrice) - openInterest
+    //     int256 longPnL = _calculatePnL(
+    //         _longOpenInterestForTrader.usd, _longOpenInterestForTrader.tokens, indexTokenPrice, Keys.POSITION_LONG
+    //     );
+    //     // PnL for short can be interpreted as: openInterest - (openInterestInTokens * indexTokenPrice)
+    //     int256 shortPnL =
+    //         _calculatePnL(_shortOpenInterest.usd, _shortOpenInterest.tokens, indexTokenPrice, Keys.POSITION_SHORT);
+
+    //     pnLForTrader = longPnL + shortPnL;
+    // }
+
+    /* --------------------------------- ASSETS --------------------------------- */
 
     function getCollateralPrice() public view returns (int256) {
         return _assetPrice(collateralAsset.priceFeed);
@@ -285,6 +319,124 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /*                             INTERNAL FUNCTIONS                             */
     /* -------------------------------------------------------------------------- */
+    /* -------------------------------- PROTOCOL -------------------------------- */
+
+    /**
+     * @dev Calculate the PnL of a position
+     * @param size The size of the position in USD (6 decimals)
+     * @param sizeInTokens The size of the position in tokens (8 decimals)
+     * @param tokenPrice The price of the token (8 decimals)
+     * @param direction The direction of the position (long or short)
+     * @return pnl The PnL of the position (6 decimals)
+     */
+
+    function _calculatePnL(uint128 size, uint128 sizeInTokens, int256 tokenPrice, uint256 direction)
+        internal
+        pure
+        returns (int256 pnl)
+    {
+        if (direction == Keys.POSITION_LONG) {
+            // PnL of a long position is: (sizeInTokens * indexTokenPrice) - size
+            // (precision: (1e8 * 1e8 / 1e10) - 1e6 = 6 decimals)
+            pnl =
+                int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10)) - int256(uint256(size));
+        } else {
+            // PnL of a short position is: size - (sizeInTokens * indexTokenPrice)
+            // (precision: 1e6 - (1e8 * 1e8 / 1e10) = 6 decimals)
+            pnl =
+                int256(uint256(size)) - int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10));
+        }
+    }
+
+    /**
+     * @dev Return the total PnL of the protocol in collateral tokens
+     * @dev Basically, the flow is:
+     * - when opening the position, size == sizeInTokens * tokenPrice
+     * - now, size is still the original value, but sizeInTokens * tokenPrice will reflect the current value
+     * - so we can just compare both to get the PnL
+     * @return totalPnL The accumulated PnL of all positions (6 decimals)
+     */
+
+    function _calculateTotalPnL() internal view returns (int256 totalPnL) {
+        int256 indexTokenPrice = getIndexedPrice();
+        OpenInterest memory _longOpenInterest = longOpenInterest;
+        OpenInterest memory _shortOpenInterest = shortOpenInterest;
+
+        // PnL for long can be interpreted as: (openInterestInTokens * indexTokenPrice) - openInterest
+        int256 longPnL =
+            _calculatePnL(_longOpenInterest.usd, _longOpenInterest.tokens, indexTokenPrice, Keys.POSITION_LONG);
+        // PnL for short can be interpreted as: openInterest - (openInterestInTokens * indexTokenPrice)
+        int256 shortPnL =
+            _calculatePnL(_shortOpenInterest.usd, _shortOpenInterest.tokens, indexTokenPrice, Keys.POSITION_SHORT);
+
+        totalPnL = longPnL + shortPnL;
+    }
+
+    /**
+     * @dev Return the net value of the protocol in collateral tokens
+     * @return netValue The net value of the protocol (6 decimals)
+     * Note: Basically, it is the total liquidity minus the total PnL
+     */
+
+    function _calculateNetValue() internal view returns (uint256 netValue) {
+        // If the total PnL were to be higher than the total liquidity, this would revert
+        // Hopefully it should never happen as it would mean that the protocol is rekt
+
+        int256 totalPnL = _calculateTotalPnL();
+        // If the PnL is negative, ignore it
+        // It does not perfectly reflect the net value but it is what we want here
+        // @audit-info Still check if it's accurate and not an issue
+        return totalLiquidity - (totalPnL < 0 ? 0 : uint256(_calculateTotalPnL()));
+    }
+
+    /**
+     * @dev Return the available liquidity in USD
+     * Note: We need to do it USD-wise to be able to compare it to the open interest (which is in USD)
+     * This results in a lot of oracle requests, but it's the price to pay for more accurate calculations
+     * @return availableLiquidity The available liquidity in USD (6 decimals)
+     */
+
+    function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
+        // @audit-info Is it overkill to use the net value here instead of deposited liquidity?
+        // (meaning we susbstract the PnL as well)...
+        // ... since there is already the exposure ratio applied
+        // (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (netValue * maxUtilizationPercentage)
+        int256 collateralPrice = getCollateralPrice();
+        int256 indexTokenPrice = getIndexedPrice();
+
+        /// @audit-info This would apply the exposure ratio to the net value
+        // uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
+        /// Maybe it's better to apply it to the total liquidity and THEN substract the total PnL
+        int256 totalPnL = _calculateTotalPnL();
+        uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
+        // (precision: (1e6 * 1e2) / 1e2) - 1e6 = 1e6
+        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, Keys.MAX_EXPOSURE, 100) - totalPnLNormalized;
+        // (precision: ((1e8 * 1e8) + (1e8 * 1e8)) / 1e10) = 1e6
+        uint256 currentlyUsed = FixedPointMathLib.divUp(
+            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice)),
+            1e10
+        );
+
+        if (maxAvailable > currentlyUsed) {
+            availableLiquidity = maxAvailable - currentlyUsed;
+            // Here as well, this should not happen, since it would mean that the protocol is insolvent
+        } else {
+            availableLiquidity = 0;
+        }
+    }
+
+    /**
+     * @dev Enforce the liquidity reserve restrictions
+     * @dev Basically check that the new position/liquidity withdrawal does not break the invariants
+     * which are calculated in `_calculateAvailableLiquidity`
+     * Note: It might be a bit redundant to check it here as well since it's been checked before
+     * performing the operations, but it's the most important part of the contract so better safe than sorry
+     */
+
+    function _validateLiquidityRestrictions() internal view {
+        if (_calculateAvailableLiquidity() == 0) revert Perps_NotEnoughLiquidity(0);
+    }
+
     /* --------------------------------- TRADERS -------------------------------- */
 
     /**
@@ -376,129 +528,18 @@ contract Perps is ERC4626 {
         if (direction == Keys.POSITION_LONG) {
             longOpenInterest.usd = longOpenInterest.usd + uint128(size);
             longOpenInterest.tokens = longOpenInterest.tokens + uint128(sizeInTokens);
+            // longOpenInterestForTrader[msg.sender].usd += uint128(size);
+            // longOpenInterestForTrader[msg.sender].tokens += uint128(sizeInTokens);
         } else {
             shortOpenInterest.usd = shortOpenInterest.usd + uint128(size);
             shortOpenInterest.tokens = shortOpenInterest.tokens + uint128(sizeInTokens);
+            // shortOpenInterestForTrader[msg.sender].usd += uint128(size);
+            // shortOpenInterestForTrader[msg.sender].tokens += uint128(sizeInTokens);
         }
 
         emit Perps_OpenInterestUpdated(
             longOpenInterest.usd, longOpenInterest.tokens, shortOpenInterest.usd, shortOpenInterest.tokens
         );
-    }
-
-    /* -------------------------------- PROTOCOL -------------------------------- */
-
-    /**
-     * @dev Calculate the PnL of a position
-     * @param size The size of the position in USD (6 decimals)
-     * @param sizeInTokens The size of the position in tokens (8 decimals)
-     * @param tokenPrice The price of the token (8 decimals)
-     * @param direction The direction of the position (long or short)
-     * @return pnl The PnL of the position (6 decimals)
-     */
-
-    function _calculatePnL(uint128 size, uint128 sizeInTokens, int256 tokenPrice, uint256 direction)
-        internal
-        pure
-        returns (int256 pnl)
-    {
-        if (direction == Keys.POSITION_LONG) {
-            // PnL of a long position is: (sizeInTokens * indexTokenPrice) - size
-            // (precision: (1e8 * 1e8 / 1e10) - 1e6 = 6 decimals)
-            pnl =
-                int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10)) - int256(uint256(size));
-        } else {
-            // PnL of a short position is: size - (sizeInTokens * indexTokenPrice)
-            // (precision: 1e6 - (1e8 * 1e8 / 1e10) = 6 decimals)
-            pnl =
-                int256(uint256(size)) - int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10));
-        }
-    }
-
-    /**
-     * @dev Return the total PnL of the protocol in collateral tokens
-     * @dev Basically, the flow is:
-     * - when opening the position, size == sizeInTokens * tokenPrice
-     * - now, size is still the original value, but sizeInTokens * tokenPrice will reflect the current value
-     * - so we can just compare both to get the PnL
-     * @return totalPnL The accumulated PnL of all positions (6 decimals)
-     */
-
-    function _calculateTotalPnL() internal view returns (int256 totalPnL) {
-        int256 indexTokenPrice = getIndexedPrice();
-        // PnL for long can be interpreted as: (openInterestInTokens * indexTokenPrice) - openInterest
-        int256 longPnL =
-            _calculatePnL(longOpenInterest.usd, longOpenInterest.tokens, indexTokenPrice, Keys.POSITION_LONG);
-        // PnL for short can be interpreted as: openInterest - (openInterestInTokens * indexTokenPrice)
-        int256 shortPnL =
-            _calculatePnL(shortOpenInterest.usd, shortOpenInterest.tokens, indexTokenPrice, Keys.POSITION_SHORT);
-
-        totalPnL = longPnL + shortPnL;
-    }
-
-    /**
-     * @dev Return the net value of the protocol in collateral tokens
-     * @return netValue The net value of the protocol (6 decimals)
-     * Note: Basically, it is the total liquidity minus the total PnL
-     */
-
-    function _calculateNetValue() internal view returns (uint256 netValue) {
-        // If the total PnL were to be higher than the total liquidity, this would revert
-        // Hopefully it should never happen as it would mean that the protocol is rekt
-
-        int256 totalPnL = _calculateTotalPnL();
-        // If the PnL is negative, ignore it
-        // It does not perfectly reflect the net value but it is what we want here
-        // @audit-info Still check if it's accurate and not an issue
-        return totalLiquidity - (totalPnL < 0 ? 0 : uint256(_calculateTotalPnL()));
-    }
-
-    /**
-     * @dev Return the available liquidity in USD
-     * Note: We need to do it USD-wise to be able to compare it to the open interest (which is in USD)
-     * This results in a lot of oracle requests, but it's the price to pay for more accurate calculations
-     * @return availableLiquidity The available liquidity in USD (6 decimals)
-     */
-
-    function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
-        // @audit-info Is it overkill to use the net value here instead of deposited liquidity?
-        // (meaning we susbstract the PnL as well)...
-        // ... since there is already the exposure ratio applied
-        // (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (netValue * maxUtilizationPercentage)
-        int256 collateralPrice = getCollateralPrice();
-        int256 indexTokenPrice = getIndexedPrice();
-
-        /// @audit-info This would apply the exposure ratio to the net value
-        // uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
-        /// Maybe it's better to apply it to the total liquidity and THEN substract the total PnL
-        int256 totalPnL = _calculateTotalPnL();
-        uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
-        // (precision: (1e6 * 1e2) / 1e2) - 1e6 = 1e6
-        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, Keys.MAX_EXPOSURE, 100) - totalPnLNormalized;
-        // (precision: ((1e8 * 1e8) + (1e8 * 1e8)) / 1e10) = 1e6
-        uint256 currentlyUsed = FixedPointMathLib.divUp(
-            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice)),
-            1e10
-        );
-
-        if (maxAvailable > currentlyUsed) {
-            availableLiquidity = maxAvailable - currentlyUsed;
-            // Here as well, this should not happen, since it would mean that the protocol is insolvent
-        } else {
-            availableLiquidity = 0;
-        }
-    }
-
-    /**
-     * @dev Enforce the liquidity reserve restrictions
-     * @dev Basically check that the new position/liquidity withdrawal does not break the invariants
-     * which are calculated in `_calculateAvailableLiquidity`
-     * Note: It might be a bit redundant to check it here as well since it's been checked before
-     * performing the operations, but it's the most important part of the contract so better safe than sorry
-     */
-
-    function _validateLiquidityRestrictions() internal view {
-        if (_calculateAvailableLiquidity() == 0) revert Perps_NotEnoughLiquidity(0);
     }
 
     /* ---------------------------------- ASSET --------------------------------- */
