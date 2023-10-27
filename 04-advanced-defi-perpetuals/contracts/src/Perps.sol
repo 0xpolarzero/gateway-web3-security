@@ -12,6 +12,7 @@ pragma solidity 0.8.20;
 /* -------------------------------------------------------------------------- */
 /*                                    STEPS                                   */
 /* -------------------------------------------------------------------------- */
+/// @dev The following steps are purposely left for documentation
 
 // [x] 1. ERC20 interface, the only allowed token to use as collateral
 // [x] 2. Indexed asset, oracle price feed
@@ -114,8 +115,10 @@ contract Perps is ERC4626 {
     }
 
     /// @dev A position
-    /// @param size The size of the position in USD
-    /// @param collateral The collateral deposited to back the position in collateral tokens
+    /// @dev We don't include the address of the trader here, as we don't need it
+    /// @param size The size of the position in USD (6 decimals)
+    /// @param collateral The collateral deposited to back the position in collateral tokens (6 decimals)
+    /// @param sizeInTokens The size of the position in tokens (8 decimals)
     /// @param owner The address of the trader
     /// @param direction The direction of the position (long or short)
     /// @param status The status of the position (open or closed)
@@ -123,10 +126,10 @@ contract Perps is ERC4626 {
     struct Position {
         uint128 size;
         uint128 collateral;
-        address trader;
+        uint192 sizeInTokens; // might as well finish that second slot
         uint8 direction;
         uint8 status;
-        uint80 timestamp; // might as well finish up the second slot
+        uint48 timestamp;
     }
 
     /* -------------------------------------------------------------------------- */
@@ -332,17 +335,17 @@ contract Perps is ERC4626 {
         SafeTransferLib.safeTransferFrom(collateralAsset.token, msg.sender, address(this), collateral);
 
         // Update the open interest
-        _updateOpenInterest(size, direction);
+        uint256 sizeInTokens = _updateOpenInterest(size, direction);
 
         // Create the position
         positions[msg.sender].push(
             Position({
                 size: uint128(size),
                 collateral: uint128(collateral),
-                trader: msg.sender,
+                sizeInTokens: uint192(sizeInTokens),
                 direction: uint8(direction),
                 status: uint8(Keys.POSITION_OPEN),
-                timestamp: uint80(block.timestamp)
+                timestamp: uint48(block.timestamp)
             })
         );
 
@@ -362,10 +365,10 @@ contract Perps is ERC4626 {
      * @param direction The direction of the position (long or short)
      */
 
-    function _updateOpenInterest(uint256 size, uint256 direction) internal {
+    function _updateOpenInterest(uint256 size, uint256 direction) internal returns (uint256 sizeInTokens) {
         // Called each time a position is opened/increased (and later decreased/closed to decrease the open interest)
         // (precision: 1e6 * 1e8 / 1e6 = 8 decimals)
-        uint256 sizeInTokens = FixedPointMathLib.fullMulDiv(size, uint256(getIndexedPrice()), 1e6); // but needs *1e2 -> and ADD PRECISION
+        sizeInTokens = FixedPointMathLib.fullMulDiv(size, uint256(getIndexedPrice()), 1e6);
 
         // Update the open interest
         // @audit-info Here casting uint256 to uint128 might seem dangerous, but there is no way anyone could
@@ -386,11 +389,52 @@ contract Perps is ERC4626 {
     /* -------------------------------- PROTOCOL -------------------------------- */
 
     /**
+     * @dev Calculate the PnL of a position
+     * @param size The size of the position in USD (6 decimals)
+     * @param sizeInTokens The size of the position in tokens (8 decimals)
+     * @param tokenPrice The price of the token (8 decimals)
+     * @param direction The direction of the position (long or short)
+     * @return pnl The PnL of the position (6 decimals)
+     */
+
+    function _calculatePnL(uint128 size, uint128 sizeInTokens, int256 tokenPrice, uint256 direction)
+        internal
+        pure
+        returns (int256 pnl)
+    {
+        if (direction == Keys.POSITION_LONG) {
+            // PnL of a long position is: (sizeInTokens * indexTokenPrice) - size
+            // (precision: (1e8 * 1e8 / 1e10) - 1e6 = 6 decimals)
+            pnl =
+                int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10)) - int256(uint256(size));
+        } else {
+            // PnL of a short position is: size - (sizeInTokens * indexTokenPrice)
+            // (precision: 1e6 - (1e8 * 1e8 / 1e10) = 6 decimals)
+            pnl =
+                int256(uint256(size)) - int256(FixedPointMathLib.fullMulDivUp(sizeInTokens, uint256(tokenPrice), 1e10));
+        }
+    }
+
+    /**
      * @dev Return the total PnL of the protocol in collateral tokens
+     * @dev Basically, the flow is:
+     * - when opening the position, size == sizeInTokens * tokenPrice
+     * - now, size is still the original value, but sizeInTokens * tokenPrice will reflect the current value
+     * - so we can just compare both to get the PnL
      * @return totalPnL The accumulated PnL of all positions (6 decimals)
      */
 
-    function _calculateTotalPnL() internal view returns (int256 totalPnL) {}
+    function _calculateTotalPnL() internal view returns (int256 totalPnL) {
+        int256 indexTokenPrice = getIndexedPrice();
+        // PnL for long can be interpreted as: (openInterestInTokens * indexTokenPrice) - openInterest
+        int256 longPnL =
+            _calculatePnL(longOpenInterest.usd, longOpenInterest.tokens, indexTokenPrice, Keys.POSITION_LONG);
+        // PnL for short can be interpreted as: openInterest - (openInterestInTokens * indexTokenPrice)
+        int256 shortPnL =
+            _calculatePnL(shortOpenInterest.usd, shortOpenInterest.tokens, indexTokenPrice, Keys.POSITION_SHORT);
+
+        totalPnL = longPnL + shortPnL;
+    }
 
     /**
      * @dev Return the net value of the protocol in collateral tokens

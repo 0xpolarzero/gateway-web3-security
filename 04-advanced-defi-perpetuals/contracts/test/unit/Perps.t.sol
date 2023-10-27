@@ -280,20 +280,22 @@ contract PerpsTest is Test {
 
     /// @dev Add the position to the mapping
     function test_openLong_addsPositionToMappingLong() external hasCollateral openedLong openedShort {
+        uint256 sizeInTokens = FixedPointMathLib.fullMulDiv(POSITION_SIZE, uint256(perps.getIndexedPrice()), 1e6);
+
         Perps.Position[] memory positions = new Perps.Position[](2);
         positions[0] = perps.getPosition(address(this), 0);
         positions[1] = perps.getPosition(address(this), 1);
 
         assert(positions[0].size == POSITION_SIZE);
         assert(positions[0].collateral == POSITION_COLLATERAL);
-        assert(positions[0].trader == address(this));
+        assert(positions[0].sizeInTokens == sizeInTokens);
         assert(positions[0].direction == Keys.POSITION_LONG);
         assert(positions[0].status == Keys.POSITION_OPEN);
         assert(positions[0].timestamp == block.timestamp);
 
         assert(positions[1].size == POSITION_SIZE);
         assert(positions[1].collateral == POSITION_COLLATERAL);
-        assert(positions[1].trader == address(this));
+        assert(positions[1].sizeInTokens == sizeInTokens);
         assert(positions[1].direction == Keys.POSITION_SHORT);
         assert(positions[1].status == Keys.POSITION_OPEN);
         assert(positions[1].timestamp == block.timestamp);
