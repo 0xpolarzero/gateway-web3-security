@@ -130,24 +130,6 @@ contract Perps is ERC4626 {
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                                  CONSTANTS                                 */
-    /* -------------------------------------------------------------------------- */
-
-    /// @dev The direction of the position; either long (1) or short (2)
-    uint256 private constant POSITION_LONG = 1;
-    uint256 private constant POSITION_SHORT = 2;
-
-    /// @dev The status of the position; either open (1) or closed (2)
-    // @audit-info Should we rather use 0 for open, since it's how it will be initialized?
-    uint256 private constant POSITION_OPEN = 1;
-    uint256 private constant POSITION_CLOSED = 2;
-
-    /// @dev The maximum percentage of total liquidity that can be actively used
-    /// @dev Meaning that a withdrawal or a new position cannot be opened if it would
-    /// make the total open interest exceed this percentage
-    uint256 public constant MAX_EXPOSURE = Keys.MAX_EXPOSURE;
-
-    /* -------------------------------------------------------------------------- */
     /*                                   STORAGE                                  */
     /* -------------------------------------------------------------------------- */
     /* ----------------------------- STATE VARIABLES ---------------------------- */
@@ -253,7 +235,7 @@ contract Perps is ERC4626 {
      */
 
     function openLong(uint256 size, uint256 collateral) external {
-        _openPosition(size, collateral, POSITION_LONG);
+        _openPosition(size, collateral, Keys.POSITION_LONG);
     }
 
     /**
@@ -264,7 +246,7 @@ contract Perps is ERC4626 {
      */
 
     function openShort(uint256 size, uint256 collateral) external {
-        _openPosition(size, collateral, POSITION_SHORT);
+        _openPosition(size, collateral, Keys.POSITION_SHORT);
     }
 
     function increaseSize(uint256 positionId, uint256 size) external {}
@@ -273,20 +255,28 @@ contract Perps is ERC4626 {
 
     /* --------------------------------- GETTERS -------------------------------- */
 
+    function getAvailableLiquidity() external view returns (uint256) {
+        return _calculateAvailableLiquidity();
+    }
+
+    function getNetValue() external view returns (uint256) {
+        return _calculateNetValue();
+    }
+
+    function getTotalPnL() external view returns (int256) {
+        return _calculateTotalPnL();
+    }
+
+    function getPosition(address trader, uint256 index) external view returns (Position memory) {
+        return positions[trader][index];
+    }
+
     function getCollateralPrice() public view returns (int256) {
         return _assetPrice(collateralAsset.priceFeed);
     }
 
     function getIndexedPrice() public view returns (int256) {
         return _assetPrice(indexToken.priceFeed);
-    }
-
-    function getAvailableLiquidity() public view returns (uint256) {
-        return _calculateAvailableLiquidity();
-    }
-
-    function getNetValue() public view returns (uint256) {
-        return _calculateNetValue();
     }
 
     /* -------------------------------------------------------------------------- */
@@ -331,10 +321,10 @@ contract Perps is ERC4626 {
 
         // Convert the collateral to USD to calculate the leverage with similar units
         // (precision: 1e6 * 1e8 = 14 decimals)
-        uint256 collateralInUSD = FixedPointMathLib.fullMulDiv(collateral, uint256(getCollateralPrice()), 1);
+        uint256 collateralInUsd = FixedPointMathLib.fullMulDiv(collateral, uint256(getCollateralPrice()), 1);
         // Compare the leverage to the max leverage
         // (precision: (1e6 * 1e14) / (1e14) = 6 decimals)
-        uint256 leverage = FixedPointMathLib.fullMulDivUp(size, 1e14, collateralInUSD);
+        uint256 leverage = FixedPointMathLib.fullMulDivUp(size, 1e14, collateralInUsd);
         // both are 6 decimals
         if (leverage > Keys.MAX_LEVERAGE) revert Perps_LeverageTooHigh(leverage, Keys.MAX_LEVERAGE);
 
@@ -351,7 +341,7 @@ contract Perps is ERC4626 {
                 collateral: uint128(collateral),
                 trader: msg.sender,
                 direction: uint8(direction),
-                status: uint8(POSITION_OPEN),
+                status: uint8(Keys.POSITION_OPEN),
                 timestamp: uint80(block.timestamp)
             })
         );
@@ -380,7 +370,7 @@ contract Perps is ERC4626 {
         // Update the open interest
         // @audit-info Here casting uint256 to uint128 might seem dangerous, but there is no way anyone could
         // open a position with a size that would make it overflow
-        if (direction == POSITION_LONG) {
+        if (direction == Keys.POSITION_LONG) {
             longOpenInterest.usd = longOpenInterest.usd + uint128(size);
             longOpenInterest.tokens = longOpenInterest.tokens + uint128(sizeInTokens);
         } else {
@@ -440,7 +430,7 @@ contract Perps is ERC4626 {
         int256 totalPnL = _calculateTotalPnL();
         uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
         // (precision: (1e6 * 1e2) / 1e2) - 1e6 = 1e6
-        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, MAX_EXPOSURE, 100) - totalPnLNormalized;
+        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, Keys.MAX_EXPOSURE, 100) - totalPnLNormalized;
         // (precision: ((1e8 * 1e8) + (1e8 * 1e8)) / 1e10) = 1e6
         uint256 currentlyUsed = FixedPointMathLib.divUp(
             (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice)),
