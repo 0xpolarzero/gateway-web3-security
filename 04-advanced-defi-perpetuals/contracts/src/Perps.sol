@@ -9,6 +9,10 @@ pragma solidity 0.8.20;
 /// that will be added in the next mission.
 /// @dev Is it also missing many getters and setters (e.g. price feeds).
 
+/// ALSO MENTION THE FACT THAT:
+/// We refer to available liquidity, net value, total PnL USD-wise
+/// But when we refer to collateral--if not specified collateral in USD--it is collateral wise, before conversion to USD (which should be more or less 1:1)
+
 /* -------------------------------------------------------------------------- */
 /*                                    STEPS                                   */
 /* -------------------------------------------------------------------------- */
@@ -153,7 +157,7 @@ contract Perps is ERC4626 {
     /// @dev The total open interest for longs (total size of all these positions)
     OpenInterest public longOpenInterest;
 
-    /// @dev The total liquidity deposited in USD
+    /// @dev The total liquidity deposited in USD (6 decimals)
     uint256 public totalLiquidity;
 
     /// @dev The positions associated to each trader
@@ -271,7 +275,7 @@ contract Perps is ERC4626 {
         return _calculateAvailableLiquidity();
     }
 
-    function getNetValue() external view returns (uint256) {
+    function getNetValue() external view returns (int256) {
         return _calculateNetValue();
     }
 
@@ -378,50 +382,43 @@ contract Perps is ERC4626 {
      * Note: Basically, it is the total liquidity minus the total PnL
      */
 
-    function _calculateNetValue() internal view returns (uint256 netValue) {
-        // If the total PnL were to be higher than the total liquidity, this would revert
-        // Hopefully it should never happen as it would mean that the protocol is rekt
-
-        int256 totalPnL = _calculateTotalPnL();
-        // If the PnL is negative, ignore it
-        // It does not perfectly reflect the net value but it is what we want here
-        // @audit-info Still check if it's accurate and not an issue
-        return totalLiquidity - (totalPnL < 0 ? 0 : uint256(_calculateTotalPnL()));
+    function _calculateNetValue() internal view returns (int256 netValue) {
+        // @audit-info Should we use 0 if the PnL is negative, or include it and inflate the net value? We choose the latter here
+        // Also, we use an int to be able to calculate a negative net value. In this case, meaning if the total PnL is higher than the liquidity:
+        // the protocol is absolutely rekt.
+        // This definitively needs some check; is it accurate?
+        return int256(totalLiquidity) - _calculateTotalPnL();
     }
 
     /**
      * @dev Return the available liquidity in USD
      * Note: We need to do it USD-wise to be able to compare it to the open interest (which is in USD)
      * This results in a lot of oracle requests, but it's the price to pay for more accurate calculations
+     * @dev We COULD add an extra check, by using the net value instead of total liquidity (meaning substracting the total PnL as well).
+     * However this seems overkill; or isn't it?
      * @return availableLiquidity The available liquidity in USD (6 decimals)
      */
 
     function _calculateAvailableLiquidity() internal view returns (uint256 availableLiquidity) {
-        // @audit-info Is it overkill to use the net value here instead of deposited liquidity?
-        // (meaning we susbstract the PnL as well)...
-        // ... since there is already the exposure ratio applied
-        // (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (netValue * maxUtilizationPercentage)
-        int256 collateralPrice = getCollateralPrice();
-        int256 indexTokenPrice = getIndexedPrice();
+        // (shortOpenInterest) + (longOpenInterestInTokens * currentIndexTokenPrice) < (depositedLiquidity * maxUtilizationPercentage)
+        uint256 collateralPrice = uint256(getCollateralPrice());
+        uint256 indexTokenPrice = uint256(getIndexedPrice());
 
-        /// @audit-info This would apply the exposure ratio to the net value
-        // uint256 maxAvailable = (_calculateNetValue() * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
-        /// Maybe it's better to apply it to the total liquidity and THEN substract the total PnL
-        int256 totalPnL = _calculateTotalPnL();
-        uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
+        // (precision: (1e6 * 1e8) / 1e8) = 1e6
+        uint256 totalLiquidityUsd = FixedPointMathLib.fullMulDiv(totalLiquidity, collateralPrice, 1e8);
+        // uint256 maxAvailable = (totalLiquidity * uint256(collateralPrice) * MAX_EXPOSURE) / 100;
         // (precision: (1e6 * 1e2) / 1e2) - 1e6 = 1e6
-        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidity, Keys.MAX_EXPOSURE, 100) - totalPnLNormalized;
+        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidityUsd, Keys.MAX_EXPOSURE, 1e2);
         // (precision: ((1e8 * 1e8) + (1e8 * 1e8)) / 1e10) = 1e6
         uint256 currentlyUsed = FixedPointMathLib.divUp(
-            (shortOpenInterest.tokens * uint256(collateralPrice)) + (longOpenInterest.tokens * uint256(indexTokenPrice)),
-            1e10
+            (shortOpenInterest.tokens * collateralPrice) + (longOpenInterest.tokens * indexTokenPrice), 1e10
         );
 
-        if (maxAvailable > currentlyUsed) {
-            availableLiquidity = maxAvailable - currentlyUsed;
+        if (maxAvailable <= currentlyUsed) {
             // Here as well, this should not happen, since it would mean that the protocol is insolvent
-        } else {
             availableLiquidity = 0;
+        } else {
+            availableLiquidity = maxAvailable - currentlyUsed;
         }
     }
 
@@ -441,6 +438,7 @@ contract Perps is ERC4626 {
 
     /**
      * @dev Create a position (long or short)
+     * @dev The size
      * @dev Requirements:
      * - The contract has been approved to transfer the collateral from the trader
      * - The size is higher than the minimum allowed (MIN_POSITION_SIZE)
@@ -519,8 +517,8 @@ contract Perps is ERC4626 {
 
     function _updateOpenInterest(uint256 size, uint256 direction) internal returns (uint256 sizeInTokens) {
         // Called each time a position is opened/increased (and later decreased/closed to decrease the open interest)
-        // (precision: 1e6 * 1e8 / 1e6 = 8 decimals)
-        sizeInTokens = FixedPointMathLib.fullMulDiv(size, uint256(getIndexedPrice()), 1e6);
+        // (precision: 1e6 * 1e10 / 1e8 = 8 decimals)
+        sizeInTokens = FixedPointMathLib.fullMulDivUp(size, 1e10, uint256(getIndexedPrice()));
 
         // Update the open interest
         // @audit-info Here casting uint256 to uint128 might seem dangerous, but there is no way anyone could
@@ -560,10 +558,11 @@ contract Perps is ERC4626 {
     /* -------------------------------------------------------------------------- */
     /* ------------------------------- ACCOUNTING ------------------------------- */
 
-    /// @dev Return the total assets of the vault (here the net value)
-    /// Meaning that we substract the total PnL from the total liquidity
+    /// @dev Return the total assets of the vault (here the available liquidity)
+    /// Meaning that we substract the total open interest from the vault and apply the max exposure factor
+    /// so the vault calculates the shares on an actual value based on the state of the protocol
     function totalAssets() public view override returns (uint256) {
-        return _calculateNetValue();
+        return _calculateAvailableLiquidity();
     }
 
     /* -------------------------------- CONSTANTS ------------------------------- */
@@ -595,8 +594,10 @@ contract Perps is ERC4626 {
 
     function _beforeWithdraw(uint256 assets, uint256 /* shares */ ) internal override {
         // Check that the amount is not greater than the available liquidity
-        uint256 availableLiquidity = _calculateAvailableLiquidity();
-        if (assets > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
+        /// @audit-info We don't need this anymore, because the totalAssets are actually the available liquidity already,
+        /// it surely can't be exceeded when withdrawing
+        // uint256 availableLiquidity = _calculateAvailableLiquidity();
+        // if (assets > availableLiquidity) revert Perps_NotEnoughLiquidity(availableLiquidity);
 
         // Update the total liquidity
         unchecked {

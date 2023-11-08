@@ -185,15 +185,20 @@ contract PerpsTest is Test {
 
     /// @dev Emit the event with correct parameters
     function test_withdrawLiquidity_emitsEvent() external depositedLiquidity withdrawnLiquidity {
+        uint256 availableLiquidity = perps.getAvailableLiquidity();
+        uint256 amountToWithdraw = availableLiquidity / 2;
+
         // Shares are the same as the amount withdrawn (since there is only one provider) * decimals offset
-        uint256 expectedShares = withdrawnLiquidityAmount * 10 ** Keys.DECIMALS_OFFSET;
+        uint256 expectedShares = perps.convertToShares(amountToWithdraw) + 1;
 
         // Check the event
         vm.expectEmit();
         // by, to, owner, assets, shares
         // by, to & owner are the same address
-        emit Withdraw(address(this), address(this), address(this), withdrawnLiquidityAmount, expectedShares);
-        perps.withdrawLiquidity(withdrawnLiquidityAmount);
+        // amountToWithdraw:
+        emit Withdraw(address(this), address(this), address(this), amountToWithdraw, expectedShares);
+        console.log("amountToWithdraw", amountToWithdraw, "expectedShares", expectedShares);
+        perps.withdrawLiquidity(amountToWithdraw);
     }
 
     /* --------------------------------- REVERT --------------------------------- */
@@ -214,13 +219,14 @@ contract PerpsTest is Test {
     }
 
     /// @dev Revert if there is not enough available liquidity
+    /// TODO THIS IS NOT ACCURATE: this will revert because it exceeds the shares of the user; we need to actually reduce the available liquidity by opening a position and increasing its PnL
     function test_withdrawLiquidity_revertsIfNotEnoughAvailableLiquidity() external depositedLiquidity {
-        // Calculate the max amount of liquidity that can be withdrawn
-        // Basically: (total liquidity * max exposure percentage) - totalPnL - currently used
-        // currently used = total open interest
+        // Deposit more liquidity as another provider (otherwise it will just exceed the total assets)
+        _depositLiquidityAs(ALICE, DEPOSIT_AMOUNT * 10);
+
         uint256 maxAmount = perps.getAvailableLiquidity();
 
-        vm.expectRevert(abi.encodeWithSelector(Perps.Perps_NotEnoughLiquidity.selector, maxAmount));
+        vm.expectRevert(WithdrawMoreThanMax.selector);
         perps.withdrawLiquidity(maxAmount + 1);
     }
 
@@ -231,7 +237,7 @@ contract PerpsTest is Test {
     /// @dev Collateral was minted and approved
     modifier hasCollateral() {
         MockERC20(address(collateralAsset.token)).mint(address(this), POSITION_COLLATERAL * 2);
-        IERC20(address(collateralAsset.token)).approve(address(perps), POSITION_COLLATERAL * 2);
+        MockERC20(address(collateralAsset.token)).approve(address(perps), POSITION_COLLATERAL * 2);
         _;
     }
 
@@ -269,7 +275,7 @@ contract PerpsTest is Test {
         // Check the total open interest
         (uint256 longOpenInterest, uint256 longOpenInterestTokens) = perps.longOpenInterest();
         (uint256 shortOpenInterest, uint256 shortOpenInterestTokens) = perps.shortOpenInterest();
-        uint256 sizeInTokens = FixedPointMathLib.fullMulDiv(POSITION_SIZE, uint256(perps.getIndexedPrice()), 1e6);
+        uint256 sizeInTokens = FixedPointMathLib.fullMulDivUp(POSITION_SIZE, 1e10, uint256(perps.getIndexedPrice()));
 
         assert(longOpenInterest == POSITION_SIZE);
         assert(longOpenInterestTokens == sizeInTokens);
@@ -280,7 +286,10 @@ contract PerpsTest is Test {
 
     /// @dev Add the position to the mapping
     function test_openLong_addsPositionToMappingLong() external hasCollateral openedLong openedShort {
-        uint256 sizeInTokens = FixedPointMathLib.fullMulDiv(POSITION_SIZE, uint256(perps.getIndexedPrice()), 1e6);
+        uint256 sizeInTokens = FixedPointMathLib.fullMulDivUp(POSITION_SIZE, 1e10, uint256(perps.getIndexedPrice()));
+        // So for size of $100 and price of $20,000
+        // We have size of 100e6 and price of 20_000e8
+        // Size in tokens should be 100e6 / 20_000e8 * 1e10 = 500_000 meaning 0.005
 
         Perps.Position[] memory positions = new Perps.Position[](2);
         positions[0] = perps.getPosition(address(this), 0);
@@ -454,6 +463,74 @@ contract PerpsTest is Test {
     }
 
     /* -------------------------------------------------------------------------- */
+    /*                              PRICE VARIATIONS                              */
+    /* -------------------------------------------------------------------------- */
+
+    /// @dev States are calculated correctly on price movements
+    /// @dev Includes:
+    /// - Available liquidity
+    /// - Net value
+    /// - Total PnL
+    /// - Positions PnL
+    function test_GLOBAL_updatesCorrectlyOnPriceVariation() external hasCollateral {
+        // Deposit some liquidity and open a position
+        _depositLiquidityAs(ALICE, _calculateRequiredDepositForAvailableLiquidity(POSITION_SIZE));
+        perps.openLong(POSITION_SIZE, POSITION_COLLATERAL);
+        Perps.Position memory pos = perps.getPosition(address(this), 0);
+
+        // Available liquidity should be 0 because it's all used in the position
+        assert(perps.getAvailableLiquidity() == 0);
+
+        // Deposit some more liquidity to be able to actually use the protocol
+        _depositLiquidityAs(BOB, _calculateRequiredDepositForAvailableLiquidity(POSITION_SIZE * 9));
+
+        // Get initial values
+        uint256 availableLiquidityA = perps.getAvailableLiquidity();
+        int256 netValueA = perps.getNetValue();
+        int256 totalPnLA = perps.getTotalPnL();
+        int256 positionPnLA = perps.getPositionPnL(address(this), 0);
+
+        // Check initial values
+        int256 expectedPnLA = _calculatePnL(pos);
+        assert(netValueA == int256(perps.totalLiquidity()) - totalPnLA);
+        assert(totalPnLA == expectedPnLA && positionPnLA == expectedPnLA);
+
+        // Increase the price of the index token and get values
+        _updateIndexTokenPriceByFactor(1.1e8);
+        uint256 availableLiquidityB = perps.getAvailableLiquidity();
+        int256 netValueB = perps.getNetValue();
+        int256 totalPnLB = perps.getTotalPnL();
+        int256 positionPnLB = perps.getPositionPnL(address(this), 0);
+
+        {
+            // Check values
+            int256 expectedPnLB = _calculatePnL(pos);
+            assert(availableLiquidityB == _calculateAvailableLiquidity(pos));
+            assert(netValueB == int256(perps.totalLiquidity()) - totalPnLB);
+            assert(totalPnLB == expectedPnLB && positionPnLB == expectedPnLB);
+            assert(totalPnLB > totalPnLA && positionPnLB > positionPnLA);
+            assert(netValueB < netValueA);
+        }
+
+        {
+            // Decrease it and get values
+            _updateIndexTokenPriceByFactor(0.8e8);
+            uint256 availableLiquidityC = perps.getAvailableLiquidity();
+            int256 netValueC = perps.getNetValue();
+            int256 totalPnLC = perps.getTotalPnL();
+            int256 positionPnLC = perps.getPositionPnL(address(this), 0);
+
+            // Check values
+            int256 expectedPnLC = _calculatePnL(pos);
+            assert(availableLiquidityC == _calculateAvailableLiquidity(pos));
+            assert(netValueC == int256(perps.totalLiquidity()) - totalPnLC);
+            assert(totalPnLC == expectedPnLC && positionPnLC == expectedPnLC);
+            assert(totalPnLC < totalPnLB && positionPnLC < positionPnLB);
+            assert(netValueC > netValueB);
+        }
+    }
+
+    /* -------------------------------------------------------------------------- */
     /*                              HELPER FUNCTIONS                              */
     /* -------------------------------------------------------------------------- */
 
@@ -477,19 +554,53 @@ contract PerpsTest is Test {
         (, uint256 shortOpenInterestTokens) = perps.shortOpenInterest();
         (, uint256 longOpenInterestTokens) = perps.longOpenInterest();
 
-        int256 totalPnL = perps.getTotalPnL();
-        uint256 totalPnLNormalized = totalPnL < 0 ? 0 : uint256(totalPnL);
-
         // Calculate the total used liquidity
         uint256 currentlyUsed = FixedPointMathLib.divUp(
             (shortOpenInterestTokens * uint256(collateralPrice)) + (longOpenInterestTokens * uint256(indexTokenPrice)),
             1e10
         );
 
-        // We know that availableLiquidity = FixedPointMathLib.fullMulDiv(totalLiquidity, Keys.MAX_EXPOSURE, 100) - totalPnLNormalized - currentlyUsed;
-        // availableLiquidity = totalLiquidity * Keys.MAX_EXPOSURE / 100 - totalPnLNormalized - currentlyUsed
-        // requiredDeposit = (availableLiquidity + totalPnLNormalized + currentlyUsed) * 100 / Keys.MAX_EXPOSURE
-        requiredDeposit =
-            FixedPointMathLib.mulDivUp(targetLiquidity + totalPnLNormalized + currentlyUsed, 100, Keys.MAX_EXPOSURE);
+        // We know that availableLiquidity = totalLiquidity * Keys.MAX_EXPOSURE / 100 - currentlyUsed
+        // requiredDeposit = (availableLiquidity + currentlyUsed) * 100 / Keys.MAX_EXPOSURE
+        requiredDeposit = FixedPointMathLib.mulDivUp(targetLiquidity + currentlyUsed, 100, Keys.MAX_EXPOSURE);
+    }
+
+    /// @dev Calculate the PnL of a position
+    function _calculatePnL(Perps.Position memory position) private view returns (int256 pnl) {
+        pnl = int256(FixedPointMathLib.fullMulDivUp(position.sizeInTokens, uint256(perps.getIndexedPrice()), 1e10))
+            - int256(uint256(position.size));
+    }
+
+    /// @dev Calculate the available liquidity (with a single position)
+    function _calculateAvailableLiquidity(Perps.Position memory position)
+        private
+        view
+        returns (uint256 availableLiquidity)
+    {
+        uint256 collateralPrice = uint256(perps.getCollateralPrice());
+        uint256 indexTokenPrice = uint256(perps.getIndexedPrice());
+
+        uint256 totalLiquidityUsd = FixedPointMathLib.fullMulDiv(perps.totalLiquidity(), collateralPrice, 1e8);
+        uint256 maxAvailable = FixedPointMathLib.fullMulDiv(totalLiquidityUsd, Keys.MAX_EXPOSURE, 1e2);
+        uint256 currentlyUsed = FixedPointMathLib.divUp(
+            position.direction == Keys.POSITION_LONG
+                ? position.sizeInTokens * indexTokenPrice
+                : position.sizeInTokens * collateralPrice,
+            1e10
+        );
+
+        if (maxAvailable <= currentlyUsed) {
+            availableLiquidity = 0;
+        } else {
+            availableLiquidity = maxAvailable - currentlyUsed;
+        }
+    }
+
+    /// @dev Update the price of the index token by a specified factor
+    function _updateIndexTokenPriceByFactor(uint256 factor) private {
+        uint256 indexTokenPrice = uint256(perps.getIndexedPrice());
+        MockV3Aggregator(indexAsset.priceFeed).updateAnswer(
+            int256(FixedPointMathLib.fullMulDiv(indexTokenPrice, factor, 1e8))
+        );
     }
 }
