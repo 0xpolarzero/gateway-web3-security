@@ -25,6 +25,6 @@ library OracleLib {
             revert OracleLib__StalePrice();
         }
 
-        return (roundID, answer, startedAt, updatedAt, answeredInRound);
+        return (roundID, answer < 0 ? int256(0) : answer, startedAt, updatedAt, answeredInRound);
     }
 }
